@@ -1,3 +1,4 @@
+
 /*
   Simple DirectMedia Layer
   Copyright (C) 1997-2023 Sam Lantinga <slouken@libsdl.org>
@@ -25,8 +26,34 @@
 #include "../../core/windows/SDL_windows.h"
 #include <mmsystem.h>
 
+#include "SDL_thread.h"
 #include "SDL_timer.h"
 #include "SDL_hints.h"
+
+#ifdef CREATE_WAITABLE_TIMER_HIGH_RESOLUTION
+static void SDL_CleanupWaitableTimer(void *timer)
+{
+    CloseHandle(timer);
+}
+
+HANDLE SDL_GetWaitableTimer()
+{
+    static SDL_TLSID TLS_timer_handle;
+    HANDLE timer;
+
+    if (!TLS_timer_handle) {
+        TLS_timer_handle = SDL_TLSCreate();
+    }
+    timer = SDL_TLSGet(TLS_timer_handle);
+    if (!timer) {
+        timer = CreateWaitableTimerExW(NULL, NULL, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
+        if (timer) {
+            SDL_TLSSet(TLS_timer_handle, timer, SDL_CleanupWaitableTimer);
+        }
+    }
+    return timer;
+}
+#endif /* CREATE_WAITABLE_TIMER_HIGH_RESOLUTION */
 
 
 /* The first (low-resolution) ticks value of the application */
@@ -138,18 +165,43 @@ Uint64 SDL_GetPerformanceFrequency(void)
 
 void SDL_Delay(Uint32 ms)
 {
-    /* Sleep() is not publicly available to apps in early versions of WinRT.
-     *
-     * Visual C++ 2013 Update 4 re-introduced Sleep() for Windows 8.1 and
-     * Windows Phone 8.1.
-     *
-     * Use the compiler version to determine availability.
-     *
-     * NOTE #1: _MSC_FULL_VER == 180030723 for Visual C++ 2013 Update 3.
-     * NOTE #2: Visual C++ 2013, when compiling for Windows 8.0 and
-     *    Windows Phone 8.0, uses the Visual C++ 2012 compiler to build
-     *    apps and libraries.
-     */
+    /* CREATE_WAITABLE_TIMER_HIGH_RESOLUTION flag was added in Windows 10 version 1803.
+    * 
+    * Sleep() is not publicly available to apps in early versions of WinRT.
+    *
+    * Visual C++ 2013 Update 4 re-introduced Sleep() for Windows 8.1 and
+    * Windows Phone 8.1.
+    *
+    * Use the compiler version to determine availability.
+    *
+    * NOTE #1: _MSC_FULL_VER == 180030723 for Visual C++ 2013 Update 3.
+    * NOTE #2: Visual C++ 2013, when compiling for Windows 8.0 and
+    *    Windows Phone 8.0, uses the Visual C++ 2012 compiler to build
+    *    apps and libraries.
+    */
+#ifdef CREATE_WAITABLE_TIMER_HIGH_RESOLUTION 
+    HANDLE timer = SDL_GetWaitableTimer();
+    if (timer) {
+        LARGE_INTEGER due_time;
+        due_time.QuadPart = -(ms * 10000LL);
+        if (SetWaitableTimerEx(timer, &due_time, 0, NULL, NULL, NULL, 0)) {
+            WaitForSingleObject(timer, INFINITE);
+        }
+        return;
+    }
+
+    /*
+    HANDLE timer = CreateWaitableTimerExW(NULL, NULL, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
+    if (timer) {
+        LARGE_INTEGER due_time;
+        due_time.QuadPart = -(ms * 10000LL);
+        if (SetWaitableTimerEx(timer, &due_time, 0, NULL, NULL, NULL, 0)) {
+            WaitForSingleObject(timer, INFINITE);
+        }
+        CloseHandle(timer);
+        return;
+    }*/
+#endif
 #if defined(__WINRT__) && defined(_MSC_FULL_VER) && (_MSC_FULL_VER <= 180030723)
     static HANDLE mutex = 0;
     if (!mutex) {
